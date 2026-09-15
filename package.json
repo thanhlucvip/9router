@@ -9,6 +9,7 @@
     "build": "next build --webpack",
     "postbuild": "node scripts/copy-standalone-assets.mjs",
     "postbuild:bun": "node scripts/copy-standalone-assets.mjs",
+    "deploy": "npm run build && if pm2 describe 9router >/dev/null 2>&1; then pm2 restart 9router; else pm2 start npm --name 9router -- run start; fi",
     "start": "node custom-server.js --port 20127",
     "start:pm2": "pm2 start npm --name 9router -- run start",
     "restart": "pm2 restart 9router",
