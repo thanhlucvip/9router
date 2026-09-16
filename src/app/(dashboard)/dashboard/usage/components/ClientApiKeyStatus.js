@@ -17,7 +17,7 @@ import Card from "@/shared/components/Card";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 
 const CODEX_PROVIDER = "codex";
-const REFRESH_INTERVAL_MS = 30_000;
+const REFRESH_INTERVAL_MS = 5_000;
 const UNASSIGNED_ACCOUNT_ID = "__unassigned_codex_account__";
 
 function getAccountLabel(account, binding) {
@@ -272,6 +272,8 @@ export default function ClientApiKeyStatus({ activeRequests = [], activeClientTo
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [streamActiveRequests, setStreamActiveRequests] = useState([]);
+  const [streamActiveClientTokens, setStreamActiveClientTokens] = useState([]);
   const rfInstance = useRef(null);
   const containerRef = useRef(null);
 
@@ -311,6 +313,32 @@ export default function ClientApiKeyStatus({ activeRequests = [], activeClientTo
     };
   }, [loadBindings]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let eventSource;
+
+    try {
+      eventSource = new EventSource("/api/usage/stream");
+      eventSource.onmessage = (event) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(event.data);
+          setStreamActiveRequests(Array.isArray(data.activeRequests) ? data.activeRequests : []);
+          setStreamActiveClientTokens(Array.isArray(data.activeClientTokens) ? data.activeClientTokens : []);
+        } catch {
+          // Ignore malformed stream frames; the next frame can recover the state.
+        }
+      };
+    } catch {
+      // EventSource is unavailable in non-browser environments.
+    }
+
+    return () => {
+      cancelled = true;
+      eventSource?.close();
+    };
+  }, []);
+
   const accountMap = useMemo(
     () => new Map(accounts.map((account) => [account.id, account])),
     [accounts],
@@ -318,13 +346,16 @@ export default function ClientApiKeyStatus({ activeRequests = [], activeClientTo
 
   const activeByToken = useMemo(() => {
     const byId = {};
-    const requests = activeClientTokens.length ? activeClientTokens : activeRequests;
+    const hasPropData = activeClientTokens.length > 0 || activeRequests.length > 0;
+    const requests = hasPropData
+      ? (activeClientTokens.length ? activeClientTokens : activeRequests)
+      : (streamActiveClientTokens.length ? streamActiveClientTokens : streamActiveRequests);
     for (const request of requests) {
       if (request.provider?.toLowerCase() !== CODEX_PROVIDER || !request.clientTokenId) continue;
       byId[request.clientTokenId] = (byId[request.clientTokenId] || 0) + (request.count || 1);
     }
     return byId;
-  }, [activeClientTokens, activeRequests]);
+  }, [activeClientTokens, activeRequests, streamActiveClientTokens, streamActiveRequests]);
 
   const rows = useMemo(() => tokens
     .map((token) => {
@@ -426,7 +457,7 @@ export default function ClientApiKeyStatus({ activeRequests = [], activeClientTo
         <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-400" /> In use</span>
         <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-primary" /> Ready</span>
         <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-text-muted" /> Not assigned / disabled</span>
-        <span className="ml-auto">Bindings refresh automatically every 30s.</span>
+        <span className="ml-auto">Bindings refresh automatically every 5s.</span>
       </div>
     </Card>
   );

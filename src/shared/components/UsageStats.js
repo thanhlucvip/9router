@@ -18,8 +18,6 @@ import dynamic from "next/dynamic";
 // Lazy-load: keeps @xyflow/react out of the shared bundle until topology renders
 const ProviderTopology = dynamic(() => import("@/app/(dashboard)/dashboard/usage/components/ProviderTopology"), { ssr: false });
 import UsageChart from "@/app/(dashboard)/dashboard/usage/components/UsageChart";
-// Keep the graph library out of the initial dashboard bundle and browser-only.
-const ClientApiKeyStatus = dynamic(() => import("@/app/(dashboard)/dashboard/usage/components/ClientApiKeyStatus"), { ssr: false });
 
 function timeAgo(timestamp) {
   const diff = Math.floor((Date.now() - new Date(timestamp)) / 1000);
@@ -482,9 +480,6 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           <RecentRequests requests={stats.recentRequests || []} />
         </div>
       )}
-
-      {/* Show the Codex account currently associated with each client API key. */}
-      {loading ? spinner : <ClientApiKeyStatus activeRequests={stats.activeRequests || []} activeClientTokens={stats.activeClientTokens || []} />}
 
       {/* Token / Cost chart - sync period */}
       {loading ? spinner : <UsageChart period={period} />}

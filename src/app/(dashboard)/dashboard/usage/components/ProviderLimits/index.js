@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import dynamic from "next/dynamic";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import QuotaTable from "./QuotaTable";
 import Toggle from "@/shared/components/Toggle";
@@ -42,6 +43,11 @@ import Card from "@/shared/components/Card";
 import { Button, ConfirmModal, EditConnectionModal, Modal } from "@/shared/components";
 import { USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+
+const ClientApiKeyStatus = dynamic(
+  () => import("../ClientApiKeyStatus"),
+  { ssr: false },
+);
 
 // Maps the stored providerSpecificData.authMethod to a human label for Kiro.
 // Values come from the Kiro connect flows: builder-id/idc (device code),
@@ -1523,6 +1529,9 @@ export default function ProviderLimits() {
             </div>
           </div>
         </div>
+
+      {/* Client API key routing belongs with the quota/account controls. */}
+      <ClientApiKeyStatus />
 
       <Modal
         isOpen={Boolean(clientAssignmentState)}
