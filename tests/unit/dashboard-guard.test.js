@@ -8,8 +8,6 @@ const mocks = vi.hoisted(() => ({
   })),
   getSettings: vi.fn(),
   validateApiKey: vi.fn(),
-  isClientTokenValue: vi.fn(),
-  getClientTokenByValue: vi.fn(),
   getConsistentMachineId: vi.fn(),
   verifyDashboardAuthToken: vi.fn(),
 }));
@@ -25,8 +23,6 @@ vi.mock("next/server", () => ({
 vi.mock("@/lib/localDb", () => ({
   getSettings: mocks.getSettings,
   validateApiKey: mocks.validateApiKey,
-  isClientTokenValue: mocks.isClientTokenValue,
-  getClientTokenByValue: mocks.getClientTokenByValue,
 }));
 
 vi.mock("@/shared/utils/machineId", () => ({
@@ -63,8 +59,6 @@ describe("dashboard guard public LLM API access", () => {
     process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
     mocks.getSettings.mockResolvedValue({ requireLogin: true });
     mocks.validateApiKey.mockResolvedValue(false);
-    mocks.isClientTokenValue.mockReturnValue(false);
-    mocks.getClientTokenByValue.mockResolvedValue(null);
     mocks.getConsistentMachineId.mockResolvedValue("cli-token");
     mocks.verifyDashboardAuthToken.mockResolvedValue(false);
   });
@@ -174,45 +168,6 @@ describe("dashboard guard public LLM API access", () => {
     expect(mocks.validateApiKey).toHaveBeenCalledWith("sk-valid");
   });
 
-  it("allows an active client token for remote LLM access", async () => {
-    mocks.isClientTokenValue.mockReturnValue(true);
-    mocks.getClientTokenByValue.mockResolvedValue({ id: "client-1", isActive: true });
-
-    const response = await proxy(request("/v1/responses", {
-      host: "router.example.com",
-      authorization: "Bearer 9r_active",
-    }));
-
-    expect(response).toBe(mocks.nextResponse);
-    expect(mocks.validateApiKey).not.toHaveBeenCalled();
-  });
-
-  it("returns CLIENT_TOKEN_INVALID for an unknown client token", async () => {
-    mocks.isClientTokenValue.mockReturnValue(true);
-    mocks.getClientTokenByValue.mockResolvedValue(null);
-
-    const response = await proxy(request("/v1/responses", {
-      host: "router.example.com",
-      authorization: "Bearer 9r_unknown",
-    }));
-
-    expect(response.status).toBe(401);
-    expect(response.body.error.code).toBe("CLIENT_TOKEN_INVALID");
-  });
-
-  it("returns CLIENT_TOKEN_DISABLED for a disabled client token", async () => {
-    mocks.isClientTokenValue.mockReturnValue(true);
-    mocks.getClientTokenByValue.mockResolvedValue({ id: "client-1", isActive: false });
-
-    const response = await proxy(request("/v1/responses", {
-      host: "router.example.com",
-      authorization: "Bearer 9r_disabled",
-    }));
-
-    expect(response.status).toBe(403);
-    expect(response.body.error.code).toBe("CLIENT_TOKEN_DISABLED");
-  });
-
   it("allows remote public LLM API with valid x-api-key", async () => {
     mocks.validateApiKey.mockResolvedValue(true);
 
@@ -267,8 +222,6 @@ describe("dashboard guard local-only access", () => {
     process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
     mocks.getSettings.mockResolvedValue({ requireLogin: true });
     mocks.validateApiKey.mockResolvedValue(false);
-    mocks.isClientTokenValue.mockReturnValue(false);
-    mocks.getClientTokenByValue.mockResolvedValue(null);
     mocks.getConsistentMachineId.mockResolvedValue("cli-token");
     mocks.verifyDashboardAuthToken.mockResolvedValue(false);
   });

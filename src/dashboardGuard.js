@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSettings, validateApiKey, getClientTokenByValue, isClientTokenValue } from "@/lib/localDb";
+import { getSettings, validateApiKey } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
 import { hasTrustedPeerHeaders } from "@/lib/auth/trustedPeer";
@@ -45,6 +45,7 @@ const ALWAYS_PROTECTED = [
   "/api/version/update",
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
+  "/api/oauth/zed/auto-import",
 ];
 
 // Require auth, but allow through if requireLogin is disabled
@@ -81,6 +82,7 @@ const LOCAL_ONLY_PATHS = [
   "/api/tunnel/disable",
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
+  "/api/oauth/zed/auto-import",
   "/api/auth/reset-password",
   "/api/headroom/start",
   "/api/headroom/stop",
@@ -153,28 +155,9 @@ async function hasValidApiKey(request) {
 }
 
 async function canAccessPublicLlmApi(request) {
-  return (await authorizePublicLlmApi(request)).allowed;
-}
-
-async function authorizePublicLlmApi(request) {
-  if (isLocalRequest(request)) return { allowed: true };
-  if (await hasValidCliToken(request)) return { allowed: true };
-
-  const apiKey = extractApiKey(request);
-  if (isClientTokenValue(apiKey)) {
-    const client = await getClientTokenByValue(apiKey);
-    if (!client) {
-      return { allowed: false, status: 401, code: "CLIENT_TOKEN_INVALID", message: "Invalid client token." };
-    }
-    if (!client.isActive) {
-      return { allowed: false, status: 403, code: "CLIENT_TOKEN_DISABLED", message: "This client token is disabled." };
-    }
-    return { allowed: true };
-  }
-
-  return (await hasValidApiKey(request))
-    ? { allowed: true }
-    : { allowed: false, status: 401, message: "API key required for remote API access" };
+  if (isLocalRequest(request)) return true;
+  if (await hasValidCliToken(request)) return true;
+  return await hasValidApiKey(request);
 }
 
 async function canAccessLocalOnlyRoute(request) {
@@ -210,12 +193,14 @@ function isPublicApi(pathname) {
   return PUBLIC_API_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
 
+// Shared with src/proxy.js — the mimo login branch must respect dashboard auth.
+export { isAuthenticated };
+
 export const __test__ = {
   isLocalRequest,
   isPublicLlmApi,
   extractApiKey,
   canAccessPublicLlmApi,
-  authorizePublicLlmApi,
   canAccessLocalOnlyRoute,
 };
 
@@ -237,12 +222,8 @@ export async function proxy(request) {
   }
 
   if (isPublicLlmApi(pathname)) {
-    const authorization = await authorizePublicLlmApi(request);
-    if (authorization.allowed) return NextResponse.next();
-    if (authorization.code) {
-      return NextResponse.json({ error: { code: authorization.code, message: authorization.message } }, { status: authorization.status });
-    }
-    return NextResponse.json({ error: authorization.message }, { status: authorization.status });
+    if (await canAccessPublicLlmApi(request)) return NextResponse.next();
+    return NextResponse.json({ error: "API key required for remote API access" }, { status: 401 });
   }
 
   // Deny-by-default for /api/* — public allow-list bypasses, everything else requires auth.

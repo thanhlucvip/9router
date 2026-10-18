@@ -1,9 +1,10 @@
 import {
-  authenticateApiRequest,
-  getProviderCredentials, markAccountUnavailable, getBoundAccountFailure,
+  authenticateApiRequest, getBoundAccountFailure,
+  getProviderCredentials, markAccountUnavailable,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
+import { getKeyAccessContext, enforceKeyAccess } from "../services/keyAccess.js";
 import { handleTtsCore } from "open-sse/handlers/ttsCore.js";
 import { codedErrorResponse, errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
@@ -40,6 +41,10 @@ export async function handleTts(request) {
 
   if (!modelStr) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
   if (!body.input) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: input");
+
+  // Per-key access control: requested target, before combo expansion.
+  const keyAccessDenied = await enforceKeyAccess(await getKeyAccessContext(request), modelStr);
+  if (keyAccessDenied) return keyAccessDenied;
 
   // Combo expansion: model may be a combo name → run fallback/round-robin across models
   const comboModels = await getComboModels(modelStr);
@@ -107,9 +112,10 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language, st
 
     if (result.success) return result.response;
 
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
     const boundFailure = getBoundAccountFailure(credentials, result.status, result.error);
     if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
+
+    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
     if (shouldFallback && !credentials.routingBound) {
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;

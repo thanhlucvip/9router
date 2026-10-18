@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   clearAccountError: vi.fn(),
   extractApiKey: vi.fn(() => null),
   isValidApiKey: vi.fn(),
+  authenticateApiRequest: vi.fn(),
+  getBoundAccountFailure: vi.fn(() => null),
   getSettings: vi.fn(),
   getCombos: vi.fn(),
   handleFetchCore: vi.fn(),
@@ -18,6 +20,8 @@ vi.mock("@/sse/services/auth.js", () => ({
   clearAccountError: mocks.clearAccountError,
   extractApiKey: mocks.extractApiKey,
   isValidApiKey: mocks.isValidApiKey,
+  authenticateApiRequest: mocks.authenticateApiRequest,
+  getBoundAccountFailure: mocks.getBoundAccountFailure,
 }));
 
 vi.mock("@/lib/localDb", () => ({
@@ -53,6 +57,7 @@ describe("web fetch account state", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getSettings.mockResolvedValue({ requireApiKey: false });
+    mocks.authenticateApiRequest.mockResolvedValue({ apiKey: null, client: null, error: null });
     mocks.getCombos.mockResolvedValue([]);
     mocks.getProviderCredentials.mockResolvedValue({
       apiKey: "jina-test-key",
@@ -91,6 +96,7 @@ describe("web fetch account state", () => {
       "jina-reader",
       expect.any(Set),
       "webfetch:jina-reader",
+      { authenticatedClient: null },
     );
     expect(mocks.markAccountUnavailable).not.toHaveBeenCalled();
   });

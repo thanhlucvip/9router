@@ -10,7 +10,7 @@ export {
   createProviderNode, updateProviderNode, deleteProviderNode,
   getProxyPools, getProxyPoolById,
   createProxyPool, updateProxyPool, deleteProxyPool,
-  getApiKeys, getApiKeyById, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
+  getApiKeys, getApiKeyById, getApiKeyByKey, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
   isClientTokenValue, maskClientToken, createClientToken, rotateClientToken, getClientTokens,
   getClientTokenById, getClientTokenByValue, updateClientToken, deleteClientToken,
   getClientAccountBindings, getClientAccountBinding, setClientAccountBinding,

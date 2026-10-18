@@ -14,6 +14,7 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { handleComboChat, getComboModelsFromData } from "open-sse/services/combo.js";
+import { getKeyAccessContext, enforceKeyAccessProvider } from "../services/keyAccess.js";
 import { assertPublicUrlResolved } from "@/shared/utils/ssrfGuard.js";
 
 /**
@@ -48,20 +49,17 @@ export async function handleFetch(request) {
     log.debug("AUTH", "No API key provided (local mode)");
   }
 
-  // Enforce API key if enabled in settings
+  // Authenticate both regular API keys and client routing tokens.
   const settings = await getSettings();
   const authentication = await authenticateApiRequest(request, settings);
   apiKey = authentication.apiKey;
-  if (authentication.error) {
-    return codedErrorResponse(authentication.error.status, authentication.error.code, authentication.error.message);
-  }
+  if (authentication.error) return codedErrorResponse(authentication.error.status, authentication.error.code, authentication.error.message);
+  const authenticatedClient = authentication.client;
 
   if (!providerInput || typeof providerInput !== "string") {
     log.warn("FETCH", "Missing provider/model");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: provider (or model)");
   }
-
-  const authenticatedClient = authentication.client;
 
   if (!targetUrl || typeof targetUrl !== "string") {
     log.warn("FETCH", "Missing url");
@@ -88,6 +86,11 @@ export async function handleFetch(request) {
   // Combo expansion: providerInput may be a combo name → run fallback/round-robin across providers
   const combos = await getCombos();
   const comboModels = getComboModelsFromData(providerInput, combos);
+
+  // Per-key access control: the provider IS the model here, so a
+  // restricted key needs the provider id (or the combo) on its list.
+  const keyAccessDenied = await enforceKeyAccessProvider(await getKeyAccessContext(request), providerInput, comboModels);
+  if (keyAccessDenied) return keyAccessDenied;
   if (comboModels) {
     const comboStrategies = settings.comboStrategies || {};
     const comboStrategy = comboStrategies[providerInput]?.fallbackStrategy || settings.comboStrategy || "fallback";
@@ -177,6 +180,7 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
       }
       if (excludeConnectionIds.size === 0) {
         log.error("AUTH", `No credentials for provider: ${providerId}`);
+        if (authenticatedClient) return codedErrorResponse(503, "NO_AVAILABLE_ACCOUNT", `No credentials for provider: ${providerId}`);
         return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${providerId}`);
       }
       log.warn("FETCH", "No more accounts available", { provider: providerId });
@@ -185,7 +189,14 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
 
     log.info("AUTH", `\x1b[32mUsing ${providerId} account: ${credentials.connectionName}\x1b[0m`);
 
-    const refreshedCredentials = await checkAndRefreshToken(providerId, credentials);
+    let refreshedCredentials;
+    try {
+      refreshedCredentials = await checkAndRefreshToken(providerId, credentials);
+    } catch (error) {
+      const boundFailure = getBoundAccountFailure(credentials, 401, error.message);
+      if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
+      throw error;
+    }
 
     const result = await handleFetchCore({
       url: targetUrl,
@@ -212,6 +223,9 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
       });
     }
 
+    const boundFailure = getBoundAccountFailure(credentials, result.status, result.error);
+    if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
+
     const { shouldFallback } = await markAccountUnavailable(
       credentials.connectionId,
       result.status,
@@ -220,10 +234,7 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
       fetchLockKey,
     );
 
-    const boundFailure = getBoundAccountFailure(credentials, result.status, result.error);
-    if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
-
-    if (shouldFallback) {
+    if (shouldFallback && !credentials.routingBound) {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;

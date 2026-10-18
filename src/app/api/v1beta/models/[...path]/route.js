@@ -1,16 +1,15 @@
 import { handleChat } from "@/sse/handlers/chat.js";
 import {
   clearAccountError,
-  authenticateApiRequest,
-  getBoundAccountFailure,
   getProviderCredentials,
+  isValidApiKey,
   markAccountUnavailable,
 } from "@/sse/services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { PROVIDER_MODELS } from "@/shared/constants/models";
 import { GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
 import { initTranslators } from "open-sse/translator/index.js";
-import { codedErrorResponse } from "open-sse/utils/error.js";
+import { getKeyAccessContext, enforceKeyAccessResolved } from "@/sse/services/keyAccess.js";
 
 let initialized = false;
 const GEMINI_NATIVE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -125,6 +124,17 @@ export async function POST(request, { params }) {
   }
 }
 
+function extractGeminiClientApiKey(request) {
+  const authHeader = request.headers.get("Authorization");
+  if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
+
+  const googleApiKey = request.headers.get("x-goog-api-key");
+  if (googleApiKey) return googleApiKey;
+
+  const url = new URL(request.url);
+  return url.searchParams.get("key");
+}
+
 function normalizeGeminiNativeModel(model) {
   return String(model || "")
     .replace(/^models\//, "")
@@ -170,14 +180,19 @@ function buildGeminiNativeUrl(requestUrl, model, action) {
 
 async function validateGeminiNativeClientKey(request) {
   const settings = await getSettings();
-  const authentication = await authenticateApiRequest(request, settings);
-  if (authentication.error) {
-    return {
-      error: codedErrorResponse(authentication.error.status, authentication.error.code, authentication.error.message),
-      client: null,
-    };
+  if (!settings.requireApiKey) return null;
+
+  const apiKey = extractGeminiClientApiKey(request);
+  if (!apiKey) {
+    return Response.json({ error: { message: "Missing API key" } }, { status: 401 });
   }
-  return { error: null, client: authentication.client };
+
+  const valid = await isValidApiKey(apiKey);
+  if (!valid) {
+    return Response.json({ error: { message: "Invalid API key" } }, { status: 401 });
+  }
+
+  return null;
 }
 
 function buildGeminiNativeAuthHeaders(credentials) {
@@ -222,30 +237,27 @@ function getSafeGeminiNativeErrorText(error) {
 }
 
 async function forwardGeminiNativeRequest(request, body, model, action) {
-  const authentication = await validateGeminiNativeClientKey(request);
-  if (authentication.error) return authentication.error;
+  const authError = await validateGeminiNativeClientKey(request);
+  if (authError) return authError;
 
   const modelId = normalizeGeminiNativeModel(model);
   if (!GEMINI_NATIVE_MODEL_PATTERN.test(modelId)) {
     return Response.json({ error: { message: "Invalid model" } }, { status: 400 });
   }
+
+  // Per-key access control: this path calls Gemini directly (not via handleChat),
+  // so restricted keys are checked here, before any credential lookup.
+  const keyAccessDenied = await enforceKeyAccessResolved(await getKeyAccessContext(request), model, "gemini", modelId);
+  if (keyAccessDenied) return keyAccessDenied;
   const excludeConnectionIds = new Set();
   const bodyText = JSON.stringify(body);
   let lastError = null;
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials("gemini", excludeConnectionIds, modelId, {
-      authenticatedClient: authentication.client,
-    });
-    if (credentials?.boundError) {
-      return codedErrorResponse(credentials.boundError.status, credentials.boundError.code, credentials.boundError.message);
-    }
+    const credentials = await getProviderCredentials("gemini", excludeConnectionIds, modelId);
     if (!credentials || credentials.allRateLimited) {
       console.log(`[GEMINI_NATIVE] exhausted model=${modelId} status=${lastStatus || Number(credentials?.lastErrorCode) || 503} error=${lastError || credentials?.lastError || "No active credentials for provider: gemini"}`);
-      if (authentication.client && !credentials?.allRateLimited) {
-        return codedErrorResponse(503, "NO_AVAILABLE_ACCOUNT", "No active credentials for provider: gemini");
-      }
       return Response.json(
         { error: { message: lastError || credentials?.lastError || "No active credentials for provider: gemini" } },
         { status: lastStatus || Number(credentials?.lastErrorCode) || 503 }
@@ -308,10 +320,8 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
         "gemini",
         modelId
       );
-      const boundFailure = getBoundAccountFailure(credentials, status, errorText);
-      if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
 
-      if (shouldFallback && !credentials.routingBound) {
+      if (shouldFallback) {
         excludeConnectionIds.add(credentials.connectionId);
         lastError = errorText;
         lastStatus = status;
@@ -344,10 +354,8 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
       "gemini",
       modelId
     );
-    const boundFailure = getBoundAccountFailure(credentials, upstreamResponse.status, errorText);
-    if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
 
-    if (shouldFallback && !credentials.routingBound) {
+    if (shouldFallback) {
       excludeConnectionIds.add(credentials.connectionId);
       lastError = errorText;
       lastStatus = upstreamResponse.status;

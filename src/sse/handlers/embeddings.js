@@ -8,6 +8,7 @@ import {
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
+import { getKeyAccessContext, enforceKeyAccessResolved } from "../services/keyAccess.js";
 import { handleEmbeddingsCore } from "open-sse/handlers/embeddingsCore.js";
 import { codedErrorResponse, errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
@@ -45,16 +46,17 @@ export async function handleEmbeddings(request) {
   log.request("POST", `${url.pathname} | ${modelStr}`);
 
   // Log API key (masked)
-  const apiKey = extractApiKey(request);
+  let apiKey = extractApiKey(request);
   if (apiKey) {
     log.debug("AUTH", `API Key: ${log.maskKey(apiKey)}`);
   } else {
     log.debug("AUTH", "No API key provided (local mode)");
   }
 
-  // Enforce API key if enabled in settings
+  // Authenticate both regular API keys and client routing tokens.
   const settings = await getSettings();
   const authentication = await authenticateApiRequest(request, settings);
+  apiKey = authentication.apiKey;
   if (authentication.error) return codedErrorResponse(authentication.error.status, authentication.error.code, authentication.error.message);
 
   if (!modelStr) {
@@ -74,6 +76,10 @@ export async function handleEmbeddings(request) {
   }
 
   const { provider, model } = modelInfo;
+
+  // Per-key access control: checked before any credential lookup.
+  const keyAccessDenied = await enforceKeyAccessResolved(await getKeyAccessContext(request), modelStr, provider, model);
+  if (keyAccessDenied) return keyAccessDenied;
 
   if (modelStr !== `${provider}/${model}`) {
     log.info("ROUTING", `${modelStr} → ${provider}/${model}`);
@@ -112,7 +118,14 @@ export async function handleEmbeddings(request) {
 
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
 
-    const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
+    let refreshedCredentials;
+    try {
+      refreshedCredentials = await checkAndRefreshToken(provider, credentials);
+    } catch (error) {
+      const boundFailure = getBoundAccountFailure(credentials, 401, error.message);
+      if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
+      throw error;
+    }
 
     const result = await handleEmbeddingsCore({
       body: { ...body, model: `${provider}/${model}` },
@@ -147,9 +160,10 @@ export async function handleEmbeddings(request) {
       return result.response;
     }
 
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
     const boundFailure = getBoundAccountFailure(credentials, result.status, result.error);
     if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
+
+    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
 
     if (shouldFallback && !credentials.routingBound) {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);

@@ -14,6 +14,7 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { handleComboChat, getComboModelsFromData } from "open-sse/services/combo.js";
+import { getKeyAccessContext, enforceKeyAccessProvider } from "../services/keyAccess.js";
 
 /**
  * Handle web search request for the SSE/Next.js server.
@@ -45,7 +46,7 @@ export async function handleSearch(request) {
     log.debug("AUTH", "No API key provided (local mode)");
   }
 
-  // Enforce API key if enabled in settings
+  // Authenticate both regular API keys and client routing tokens.
   const settings = await getSettings();
   const authentication = await authenticateApiRequest(request, settings);
   apiKey = authentication.apiKey;
@@ -67,6 +68,11 @@ export async function handleSearch(request) {
   // Combo expansion: providerInput may be a combo name → run fallback/round-robin across providers
   const combos = await getCombos();
   const comboModels = getComboModelsFromData(providerInput, combos);
+
+  // Per-key access control: the provider IS the model here, so a
+  // restricted key needs the provider id (or the combo) on its list.
+  const keyAccessDenied = await enforceKeyAccessProvider(await getKeyAccessContext(request), providerInput, comboModels);
+  if (keyAccessDenied) return keyAccessDenied;
   if (comboModels) {
     const comboStrategies = settings.comboStrategies || {};
     const comboStrategy = comboStrategies[providerInput]?.fallbackStrategy || settings.comboStrategy || "fallback";
@@ -201,9 +207,8 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
     try {
       refreshedCredentials = await checkAndRefreshToken(credentialProviderId, credentials);
     } catch (error) {
-      if (credentials.routingBound) {
-        return codedErrorResponse(502, "BOUND_ACCOUNT_AUTH_ERROR", error.message || "Authentication failed for the account assigned to this client token.");
-      }
+      const boundFailure = getBoundAccountFailure(credentials, 401, error.message);
+      if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
       throw error;
     }
 
@@ -228,9 +233,10 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
 
     if (result.success) return result.response;
 
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, credentialProviderId, searchLockKey);
     const boundFailure = getBoundAccountFailure(credentials, result.status, result.error);
     if (boundFailure) return codedErrorResponse(boundFailure.status, boundFailure.code, boundFailure.message);
+
+    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, credentialProviderId, searchLockKey);
 
     if (shouldFallback && !credentials.routingBound) {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);

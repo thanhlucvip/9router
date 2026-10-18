@@ -14,13 +14,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const authMocks = vi.hoisted(() => ({
-  authenticateApiRequest: vi.fn(async () => ({ error: null, client: null })),
-  getBoundAccountFailure: vi.fn(() => null),
   getProviderCredentials: vi.fn(),
   markAccountUnavailable: vi.fn(async () => ({ shouldFallback: true, cooldownMs: 0 })),
   clearAccountError: vi.fn(async () => {}),
   extractApiKey: vi.fn(() => null),
   isValidApiKey: vi.fn(async () => true),
+  authenticateApiRequest: vi.fn(async () => ({ apiKey: null, client: null, error: null })),
+  getBoundAccountFailure: vi.fn((credentials, status, message) => (
+    credentials?.routingBound && (status === 401 || status === 403)
+      ? { status: 502, code: "BOUND_ACCOUNT_AUTH_ERROR", message }
+      : null
+  )),
 }));
 const tokenMocks = vi.hoisted(() => ({
   checkAndRefreshToken: vi.fn(async (_p, creds) => creds),
@@ -31,6 +35,7 @@ vi.mock("@/sse/services/auth.js", () => authMocks);
 vi.mock("@/sse/services/tokenRefresh.js", () => tokenMocks);
 vi.mock("@/lib/localDb", () => ({
   getSettings: vi.fn(async () => ({ requireApiKey: false })),
+  getProviderConnectionById: vi.fn(async () => ({ id: "conn-5", provider: "xai" })),
   getComboByName: vi.fn(async () => null),
   getModelAliases: vi.fn(async () => ({})),
   getProviderNodes: vi.fn(async () => []),
@@ -61,12 +66,11 @@ const account = (overrides = {}) => ({
 
 beforeEach(() => {
   global.fetch = vi.fn();
-  authMocks.authenticateApiRequest.mockClear();
-  authMocks.getBoundAccountFailure.mockClear();
   authMocks.getProviderCredentials.mockReset();
   authMocks.markAccountUnavailable.mockClear();
   authMocks.clearAccountError.mockClear();
   tokenMocks.checkAndRefreshToken.mockClear();
+  authMocks.authenticateApiRequest.mockResolvedValue({ apiKey: null, client: null, error: null });
 });
 
 afterEach(() => {
@@ -221,5 +225,21 @@ describe("handleVideoGet", () => {
 
     expect(res.status).toBe(401);
     expect(authMocks.markAccountUnavailable).toHaveBeenCalled();
+  });
+
+  it("returns a coded gateway error when a bound polling account loses auth", async () => {
+    authMocks.authenticateApiRequest.mockResolvedValueOnce({
+      apiKey: "9r_test",
+      client: { id: "client-1", name: "Client 1" },
+      error: null,
+    });
+    authMocks.getProviderCredentials.mockResolvedValueOnce(account({ routingBound: true, refreshToken: null }));
+    global.fetch.mockResolvedValueOnce(jsonResponse({ error: "unauthorized" }, 401));
+
+    const res = await handleVideoGet(new Request("http://localhost/v1/videos/req-1"), "req-1");
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(body.error.code).toBe("BOUND_ACCOUNT_AUTH_ERROR");
   });
 });

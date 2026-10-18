@@ -4,8 +4,6 @@ const mocks = vi.hoisted(() => ({
   handleChat: vi.fn(),
   getSettings: vi.fn(),
   isValidApiKey: vi.fn(),
-  authenticateApiRequest: vi.fn(),
-  getBoundAccountFailure: vi.fn(),
   getProviderCredentials: vi.fn(),
   markAccountUnavailable: vi.fn(),
   clearAccountError: vi.fn(),
@@ -16,8 +14,6 @@ vi.mock("@/sse/handlers/chat.js", () => ({
 }));
 
 vi.mock("@/sse/services/auth.js", () => ({
-  authenticateApiRequest: mocks.authenticateApiRequest,
-  getBoundAccountFailure: mocks.getBoundAccountFailure,
   getProviderCredentials: mocks.getProviderCredentials,
   isValidApiKey: mocks.isValidApiKey,
   markAccountUnavailable: mocks.markAccountUnavailable,
@@ -65,18 +61,6 @@ describe("Gemini native v1beta endpoint", () => {
     vi.clearAllMocks();
     mocks.getSettings.mockResolvedValue({ requireApiKey: true });
     mocks.isValidApiKey.mockResolvedValue(true);
-    mocks.authenticateApiRequest.mockImplementation(async (request, settings) => {
-      const authorization = request.headers.get("authorization");
-      const apiKey = authorization?.startsWith("Bearer ")
-        ? authorization.slice(7)
-        : request.headers.get("x-goog-api-key") || new URL(request.url).searchParams.get("key");
-
-      if (settings?.requireApiKey && !(await mocks.isValidApiKey(apiKey))) {
-        return { error: { status: 401, code: "INVALID_API_KEY", message: "Invalid API key" }, client: null };
-      }
-      return { error: null, client: null };
-    });
-    mocks.getBoundAccountFailure.mockReturnValue(null);
     mocks.getProviderCredentials.mockResolvedValue({
       apiKey: "real-gemini-key",
       connectionId: "gemini-conn",

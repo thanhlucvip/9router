@@ -1,17 +1,25 @@
 import {
-  getProviderConnections, getProviderConnectionById, validateApiKey,
-  updateProviderConnection, getSettings, getProxyPools,
-  getClientTokenByValue, isClientTokenValue, getClientAccountBinding,
+  getProviderConnections, getProviderConnectionById, validateApiKey, updateProviderConnection,
+  getSettings, getProxyPools, getClientTokenByValue, getClientAccountBinding, isClientTokenValue,
 } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
-import { getAntigravityQuotaCache } from "./antigravityQuota.js";
+import { getAntigravityQuotaCache, getAntigravityModelQuota } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
+
+const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
+
+function githubMonthlyResetMs(status, errorText, provider) {
+  if (resolveProviderId(provider) !== "github" || Number(status) !== 402) return null;
+  if (!String(errorText || "").toLowerCase().includes(GITHUB_MONTHLY_USAGE_LIMIT)) return null;
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+}
 
 export function getBoundAccountFailure(credentials, status, message) {
   if (!credentials?.routingBound) return null;
@@ -45,6 +53,7 @@ function formatCredentials(connection, extra = {}) {
       connectionNoProxy: resolvedProxy.connectionNoProxy,
       connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
       vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+      strictProxy: resolvedProxy.strictProxy === true,
     },
     connectionId: connection.id,
     testStatus: connection.testStatus,
@@ -61,7 +70,7 @@ export async function authenticateApiRequest(request, settings = null) {
   if (apiKey && isClientTokenValue(apiKey)) {
     const client = await getClientTokenByValue(apiKey);
     if (!client) {
-      return { apiKey, error: { status: 401, code: "CLIENT_TOKEN_INVALID", message: "Invalid client token." } };
+      return { apiKey, client: null, error: { status: 401, code: "CLIENT_TOKEN_INVALID", message: "Invalid client token." } };
     }
     if (!client.isActive) {
       return { apiKey, client, error: { status: 403, code: "CLIENT_TOKEN_DISABLED", message: "This client token is disabled." } };
@@ -81,15 +90,6 @@ export async function authenticateApiRequest(request, settings = null) {
   return { apiKey, client: null, error: null };
 }
 
-const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
-
-function githubMonthlyResetMs(status, errorText, provider) {
-  if (resolveProviderId(provider) !== "github" || Number(status) !== 402) return null;
-  if (!String(errorText || "").toLowerCase().includes(GITHUB_MONTHLY_USAGE_LIMIT)) return null;
-  const now = new Date();
-  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
-}
-
 /**
  * Get provider credentials from localDb
  * Filters out unavailable accounts and returns the selected account based on strategy
@@ -103,6 +103,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
+  const requestedModel = options?.requestedModel || model;
+  const authenticatedClient = options?.authenticatedClient || null;
   // Acquire mutex to prevent race conditions
   const currentMutex = selectionMutex;
   let resolveMutex;
@@ -114,7 +116,6 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Resolve alias to provider ID (e.g., "kc" -> "kilocode")
     const providerId = resolveProviderId(provider);
 
-    const authenticatedClient = options?.authenticatedClient || null;
     if (authenticatedClient?.id) {
       const binding = await getClientAccountBinding(authenticatedClient.id, providerId);
       if (binding?.enabled) {
@@ -124,8 +125,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           clientTokenId: authenticatedClient.id,
           clientTokenName: authenticatedClient.name,
           boundAccountId: binding.accountId,
+          allRateLimited: false,
+          lastError: null,
+          lastErrorCode: null,
         };
-        if (!boundConnection || boundConnection.provider !== providerId) {
+        if (!boundConnection || resolveProviderId(boundConnection.provider) !== providerId) {
           return {
             ...baseError,
             boundError: {
@@ -170,6 +174,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         });
         return await formatCredentials(boundConnection, {
           routingBound: true,
+          boundAccountId: binding.accountId,
           clientTokenId: authenticatedClient.id,
           clientTokenName: authenticatedClient.name,
         });
@@ -199,6 +204,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           connectionNoProxy: resolvedProxy.connectionNoProxy,
           connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
           vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+          strictProxy: resolvedProxy.strictProxy === true,
         },
       };
     }
@@ -219,9 +225,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
+      const enabled = c.providerSpecificData?.enabledModels;
+      if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
       // Antigravity: skip if live quota exhausted for this model
       if (isAntigravity && model && antigravityQuotaCache) {
-        const quota = antigravityQuotaCache.get(c.id)?.[model];
+        const connQuotas = antigravityQuotaCache.get(c.id);
+        const quota = getAntigravityModelQuota(connQuotas, model) || connQuotas?.[model];
         if (quota && quota.remainingPercentage <= 0 && quota.resetAt && new Date(quota.resetAt).getTime() > Date.now()) {
           const account = c.id?.slice(0, 8) || "unknown";
           log.info("AG_QUOTA", `${account} | CACHE_BLOCK ${model} — skip upstream until ${quota.resetAt}`);
@@ -247,7 +256,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
       if (isAntigravity && model && antigravityQuotaCache) {
         connections.forEach((c) => {
-          const resetAt = antigravityQuotaCache.get(c.id)?.[model]?.resetAt;
+          const connQuotas = antigravityQuotaCache.get(c.id);
+          const quota = getAntigravityModelQuota(connQuotas, model) || connQuotas?.[model];
+          const resetAt = quota?.resetAt;
           if (resetAt && new Date(resetAt).getTime() > Date.now()) expiries.push(resetAt);
         });
       }
@@ -326,35 +337,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = availableConnections[0];
     }
 
-    const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
-
-    return {
-      authType: connection.authType,
-      apiKey: connection.apiKey,
-      accessToken: connection.accessToken,
-      refreshToken: connection.refreshToken,
-      idToken: connection.idToken,
-      expiresAt: connection.expiresAt,
-      expiresIn: connection.expiresIn,
-      lastRefreshAt: connection.lastRefreshAt,
-      projectId: connection.projectId,
-      connectionName: connection.displayName || connection.name || connection.email || connection.id,
-      copilotToken: connection.providerSpecificData?.copilotToken,
-      providerSpecificData: {
-        ...(connection.providerSpecificData || {}),
-        connectionProxyEnabled: resolvedProxy.connectionProxyEnabled,
-        connectionProxyUrl: resolvedProxy.connectionProxyUrl,
-        connectionNoProxy: resolvedProxy.connectionNoProxy,
-        connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
-        vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
-      },
-      connectionId: connection.id,
-      // Include current status for optimization check
-      testStatus: connection.testStatus,
-      lastError: connection.lastError,
-      // Pass full connection for clearAccountError to read modelLock_* keys
-      _connection: connection
-    };
+    return await formatCredentials(connection, {
+      clientTokenId: authenticatedClient?.id || null,
+      clientTokenName: authenticatedClient?.name || null,
+    });
   } finally {
     if (resolveMutex) resolveMutex();
   }
@@ -393,11 +379,11 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       : Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
   } else {
-    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
+    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel, resolveProviderId(provider)));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
-  const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
+  const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
 
   await updateProviderConnection(connectionId, {
@@ -494,7 +480,6 @@ export function extractApiKey(request) {
   } catch {
     return null;
   }
-
 }
 
 /**

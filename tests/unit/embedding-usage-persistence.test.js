@@ -15,6 +15,8 @@ vi.mock("../../src/sse/services/auth.js", () => ({
   clearAccountError: vi.fn(),
   extractApiKey: () => "client-key",
   isValidApiKey: vi.fn(),
+  authenticateApiRequest: async () => ({ apiKey: "client-key", client: null, error: null }),
+  getBoundAccountFailure: () => null,
 }));
 vi.mock("@/lib/localDb", () => ({ getSettings: async () => ({ requireApiKey: false }) }));
 vi.mock("../../src/sse/services/model.js", () => ({
@@ -24,6 +26,7 @@ vi.mock("../../open-sse/handlers/embeddingsCore.js", () => ({
   handleEmbeddingsCore: mocks.handleEmbeddingsCore,
 }));
 vi.mock("../../open-sse/utils/error.js", () => ({
+  codedErrorResponse: (status, code, message) => Response.json({ error: { code, message } }, { status }),
   errorResponse: (status, message) => Response.json({ error: message }, { status }),
   unavailableResponse: (status, message) => Response.json({ error: message }, { status }),
 }));

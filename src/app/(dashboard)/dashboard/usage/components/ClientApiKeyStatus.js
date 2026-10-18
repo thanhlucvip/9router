@@ -15,10 +15,40 @@ import {
 import "@xyflow/react/dist/style.css";
 import Card from "@/shared/components/Card";
 import ProviderIcon from "@/shared/components/ProviderIcon";
+import { AI_PROVIDERS } from "@/shared/constants/providers";
 
 const CODEX_PROVIDER = "codex";
 const REFRESH_INTERVAL_MS = 5_000;
-const UNASSIGNED_ACCOUNT_ID = "__unassigned_codex_account__";
+const UNASSIGNED_ACCOUNT_ID = "__unassigned_provider_account__";
+const UNKNOWN_ACCOUNT_ID = "__unknown_provider_account__";
+
+function providerLabel(provider) {
+  if (!provider) return "Provider";
+  return AI_PROVIDERS[provider]?.name
+    || provider.split("-").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+}
+
+function providerInitials(provider) {
+  return providerLabel(provider)
+    .split(/\s+/)
+    .map((part) => part.charAt(0))
+    .join("")
+    .slice(0, 2)
+    .toUpperCase() || "AI";
+}
+
+function normalizeProvider(provider) {
+  return String(provider || "").trim().toLowerCase();
+}
+
+function routeKey(clientTokenId, provider, connectionId) {
+  return `${clientTokenId || ""}|${normalizeProvider(provider)}|${connectionId || ""}`;
+}
+
+function accountGroupKey(provider, accountId) {
+  if (!provider || !accountId) return UNASSIGNED_ACCOUNT_ID;
+  return `${normalizeProvider(provider)}:${accountId}`;
+}
 
 function getAccountLabel(account, binding) {
   return account?.displayName
@@ -26,21 +56,29 @@ function getAccountLabel(account, binding) {
     || account?.email
     || binding?.account?.name
     || binding?.accountId
-    || "Unknown Codex account";
+    || "Unknown account";
 }
 
 function getAccountSecondaryLabel(account, binding) {
+  const providerName = providerLabel(binding?.provider || account?.provider);
   const label = getAccountLabel(account, binding);
   const secondary = account?.email || account?.displayName || binding?.account?.name;
-  return secondary && secondary !== label ? secondary : null;
+  return secondary && secondary !== label ? `${providerName} - ${secondary}` : providerName;
 }
 
 function getStatus(row) {
-  if (!row.binding) return { label: "Not assigned", tone: "muted", dot: "#64748b" };
   if (row.token.isActive === false) return { label: "API key disabled", tone: "muted", dot: "#64748b" };
   if (row.account?.isActive === false) return { label: "Account disabled", tone: "danger", dot: "#ef4444" };
   if (row.activeCount > 0) return { label: "In use", tone: "success", dot: "#34d399" };
+  if (!row.binding) return { label: "No binding", tone: "muted", dot: "#64748b" };
   return { label: "Ready", tone: "primary", dot: "#60a5fa" };
+}
+
+function getTokenStatus(token, activeCount, bindingCount) {
+  if (token.isActive === false) return { label: "API key disabled", tone: "muted", dot: "#64748b" };
+  if (activeCount > 0) return { label: "In use", tone: "success", dot: "#34d399" };
+  if (bindingCount > 0) return { label: "Ready", tone: "primary", dot: "#60a5fa" };
+  return { label: "No binding", tone: "muted", dot: "#64748b" };
 }
 
 const STATUS_TONE_CLASSES = {
@@ -351,7 +389,7 @@ export default function ClientApiKeyStatus({ activeRequests = [], activeClientTo
       ? (activeClientTokens.length ? activeClientTokens : activeRequests)
       : (streamActiveClientTokens.length ? streamActiveClientTokens : streamActiveRequests);
     for (const request of requests) {
-      if (request.provider?.toLowerCase() !== CODEX_PROVIDER || !request.clientTokenId) continue;
+      if (normalizeProvider(request.provider) !== CODEX_PROVIDER || !request.clientTokenId) continue;
       byId[request.clientTokenId] = (byId[request.clientTokenId] || 0) + (request.count || 1);
     }
     return byId;
@@ -359,7 +397,7 @@ export default function ClientApiKeyStatus({ activeRequests = [], activeClientTo
 
   const rows = useMemo(() => tokens
     .map((token) => {
-      const binding = token.bindings?.find((item) => item.provider === CODEX_PROVIDER && item.enabled) || null;
+      const binding = token.bindings?.find((item) => normalizeProvider(item.provider) === CODEX_PROVIDER && item.enabled) || null;
       const account = binding ? (accountMap.get(binding.accountId) || binding.account || null) : null;
       return { token, binding, account, activeCount: activeByToken[token.id] || 0 };
     })
